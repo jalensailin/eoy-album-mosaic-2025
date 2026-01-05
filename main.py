@@ -6,7 +6,6 @@ import os
 import re
 import time
 import requests
-import musicbrainzngs
 from bs4 import BeautifulSoup
 from PIL import Image
 from tqdm import tqdm
@@ -14,25 +13,38 @@ from io import BytesIO
 
 # ================= CONFIG =================
 
-ITUNES_TXT_PATH = "___2025 Jazz.txt"  # path to your iTunes export
+ITUNES_TXT_PATH = "___2025 Jazz.txt"
 OUTPUT_IMAGE = "bandcamp_jazz_mosaic_2000.png"
 TEMP_DIR = "album_covers"
 
-FINAL_SIZE = 2000  # final mosaic size (2000x2000)
+FINAL_SIZE = 2000
+BASE_DELAY = 2.0  # seconds between albums
+MAX_RETRIES = 5
+
 USER_AGENT = "Mozilla/5.0 (compatible; AlbumArtMosaic/1.0)"
 
 # =========================================
 
 HEADERS = {"User-Agent": USER_AGENT}
-
-# Set user agent / headers.
-musicbrainzngs.set_useragent(
-    app="NewYearsAlbumArtMosaic", version="0.0.1", contact="jalen.michalslevy@gmail.com"
-)
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
 
 
-def normalize(text):
+def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def slugify(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+
+
+def cover_path(artist: str, album: str) -> str:
+    name = slugify(f"{artist}_{album}")
+    return os.path.join(TEMP_DIR, f"{name}.jpg")
+
+
+def miss_path(artist: str, album: str) -> str:
+    return cover_path(artist, album) + ".miss"
 
 
 def extract_unique_albums(txt_path):
@@ -43,65 +55,97 @@ def extract_unique_albums(txt_path):
             artist = row.get("Artist", "").strip()
             album = row.get("Album", "").strip()
             if artist and album:
-                albums.add((normalize(artist), normalize(album), artist, album))
+                albums.add((artist, album))
     return list(albums)
+
+
+def get_with_backoff(url, **kwargs):
+    delay = 1.0
+    for attempt in range(MAX_RETRIES):
+        r = SESSION.get(url, **kwargs)
+        if r.status_code == 200:
+            return r
+        if r.status_code == 429:
+            time.sleep(delay)
+            delay *= 2
+            continue
+        return None
+    return None
 
 
 def search_bandcamp_album(artist, album):
     query = f"{artist} {album}"
     url = "https://bandcamp.com/search"
     params = {"q": query, "item_type": "a"}
-    r = requests.get(url, params=params, headers=HEADERS, timeout=15)
-    print(r.status_code)
-    if r.status_code != 200:
+
+    r = get_with_backoff(url, params=params, timeout=15)
+    if not r:
         return None
 
     soup = BeautifulSoup(r.text, "html.parser")
-    result = soup.select_one("li.searchresult img")
-    print(result)
-    if not result:
+    img = soup.select_one("li.searchresult img")
+    if not img or not img.get("src"):
         return None
 
-    return result["src"]
+    return img["src"]
 
 
-def fetch_album_art(album_url):
-    img_data = requests.get(album_url, headers=HEADERS, timeout=15)
-
-    if img_data.status_code != 200:
+def fetch_album_art(img_url):
+    r = get_with_backoff(img_url, timeout=15)
+    if not r:
         return None
 
-    return Image.open(BytesIO(img_data.content)).convert("RGB")
+    return Image.open(BytesIO(r.content)).convert("RGB")
 
 
-def main():
+def download_covers(albums):
     os.makedirs(TEMP_DIR, exist_ok=True)
 
-    albums = extract_unique_albums(ITUNES_TXT_PATH)
-    images = []
+    for artist, album in tqdm(albums, desc="Downloading Bandcamp covers"):
+        img_path = cover_path(artist, album)
+        miss = miss_path(artist, album)
 
-    print(f"Found {len(albums)} unique albums\n")
+        if os.path.exists(img_path) or os.path.exists(miss):
+            continue
 
-    for _, _, artist, album in tqdm(albums, desc="Searching Bandcamp"):
         try:
-            album_url = search_bandcamp_album(artist, album)
-            if not album_url:
+            img_url = search_bandcamp_album(artist, album)
+            if not img_url:
+                open(miss, "w").close()
                 continue
 
-            img = fetch_album_art(album_url)
-            if img:
-                images.append(img)
-            time.sleep(0.5)  # be polite to Bandcamp
+            img = fetch_album_art(img_url)
+            if not img:
+                open(miss, "w").close()
+                continue
+
+            img.save(img_path, "JPEG", quality=90)
 
         except Exception:
-            print(f"Failed to fetch album art for {artist} - {album}")
+            open(miss, "w").close()
 
-    if not images:
-        print("No Bandcamp album art found.")
+        time.sleep(BASE_DELAY)
+
+
+def load_images_from_disk():
+    images = []
+    for fname in sorted(os.listdir(TEMP_DIR)):
+        if not fname.endswith(".jpg"):
+            continue
+        path = os.path.join(TEMP_DIR, fname)
+        try:
+            images.append(Image.open(path).convert("RGB"))
+        except Exception:
+            pass
+    return images
+
+
+def build_mosaic(images):
+    count = len(images)
+    if count == 0:
+        print("No images found.")
         return
 
-    # ===== Build mosaic =====
-    count = len(images)
     grid = math.ceil(math.sqrt(count))
     tile_size = FINAL_SIZE // grid
 
@@ -114,8 +158,18 @@ def main():
         mosaic.paste(img, (x, y))
 
     mosaic.save(OUTPUT_IMAGE, quality=95)
-    print(f"\nSaved mosaic: {OUTPUT_IMAGE}")
+    print(f"Saved mosaic: {OUTPUT_IMAGE}")
     print(f"Albums used: {count}")
+
+
+def main():
+    albums = extract_unique_albums(ITUNES_TXT_PATH)
+    print(f"Found {len(albums)} unique albums\n")
+
+    download_covers(albums)
+
+    images = load_images_from_disk()
+    build_mosaic(images)
 
 
 if __name__ == "__main__":

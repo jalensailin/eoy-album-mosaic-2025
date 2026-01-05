@@ -8,4 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# App-generated files
 ___2025 Jazz.txt
+bandcamp_jazz_mosaic_2000.png
+album_covers/
+*Albums.txt
