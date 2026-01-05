@@ -6,6 +6,7 @@ import os
 import re
 import time
 import requests
+import musicbrainzngs
 from bs4 import BeautifulSoup
 from PIL import Image
 from tqdm import tqdm
@@ -23,6 +24,11 @@ USER_AGENT = "Mozilla/5.0 (compatible; AlbumArtMosaic/1.0)"
 # =========================================
 
 HEADERS = {"User-Agent": USER_AGENT}
+
+# Set user agent / headers.
+musicbrainzngs.set_useragent(
+    app="NewYearsAlbumArtMosaic", version="0.0.1", contact="jalen.michalslevy@gmail.com"
+)
 
 
 def normalize(text):
@@ -46,29 +52,22 @@ def search_bandcamp_album(artist, album):
     url = "https://bandcamp.com/search"
     params = {"q": query, "item_type": "a"}
     r = requests.get(url, params=params, headers=HEADERS, timeout=15)
+    print(r.status_code)
     if r.status_code != 200:
         return None
 
     soup = BeautifulSoup(r.text, "html.parser")
-    result = soup.select_one("li.searchresult.album a.itemurl")
+    result = soup.select_one("li.searchresult img")
+    print(result)
     if not result:
         return None
 
-    return result["href"]
+    return result["src"]
 
 
 def fetch_album_art(album_url):
-    r = requests.get(album_url, headers=HEADERS, timeout=15)
-    if r.status_code != 200:
-        return None
+    img_data = requests.get(album_url, headers=HEADERS, timeout=15)
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    meta = soup.find("meta", property="og:image")
-    if not meta:
-        return None
-
-    img_url = meta["content"]
-    img_data = requests.get(img_url, headers=HEADERS, timeout=15)
     if img_data.status_code != 200:
         return None
 
